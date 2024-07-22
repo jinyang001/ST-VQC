@@ -23,7 +23,7 @@ import matplotlib
 
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
-from ST-Encoder import SpatialDataEncoder
+from ST_Encoder import SpatialDataEncoder
 
 
 class QFCModel(tq.QuantumModule):
