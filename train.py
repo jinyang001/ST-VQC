@@ -21,7 +21,7 @@ import random
 import numpy as np
 import matplotlib
 
-matplotlib.use('TkAgg')
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from ST_Encoder import SpatialDataEncoder
 
