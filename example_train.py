@@ -1,4 +1,4 @@
-import qiskit
+
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -20,85 +20,66 @@ from torchquantum.dataset import MNIST
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import random
 import numpy as np
-import matplotlib.pyplot as plt
-from qiskit import QuantumCircuit
+import matplotlib
 
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from STVQC_thebiglmaoski import SpatialDataEncoder
+import math
 
 class QFCModel(tq.QuantumModule):
     class QLayer(tq.QuantumModule):
-        def __init__(self):
+        def __init__(self, repeats, n_wires):
             super().__init__()
-            self.n_wires = 8
-            # gates with trainable parameters
-            for i in range(0, 100):
+            self.repeats = repeats
+            self.n_wires = n_wires
+            self.num_layers = int(math.log2(self.n_wires))
+            self.num_gates = self.calculate_num_gates()
+
+            for i in range(self.num_gates * n_wires):
                 setattr(self, 'rx' + str(i), tq.RX(has_params=True, trainable=True))
-            for i in range(0, 100):
                 setattr(self, 'ry' + str(i), tq.RY(has_params=True, trainable=True))
-            for i in range(0, 100):
-                setattr(self, 'crx' + str(i), tq.CRX(has_params=True, trainable=True))
+                setattr(self, 'cnot' + str(i), tq.CNOT(has_params=True, trainable=True))
+
+        def calculate_num_gates(self):
+            # Calculate the total number of gates needed
+            num_gates = 0
+            qubits = self.n_wires
+            while qubits > 1:
+                num_gates += qubits // 2
+                qubits //= 2
+            return num_gates * sum(self.repeats)
 
         @tq.static_support
         def forward(self, q_device: tq.QuantumDevice):
-            """
-            1. To convert tq QuantumModule to qiskit or run in the static
-            model, need to:
-                (1) add @tq.static_support before the forward
-                (2) make sure to add
-                    static=self.static_mode and
-                    parent_graph=self.graph
-                    to all the tqf functions, such as tqf.hadamard below
-            """
             self.q_device = q_device
+            qubits = self.n_wires
             rx_index = 0
             ry_index = 0
-            crx_index = 0
+            cnot_index = 0
 
-            for q in range(0, self.n_wires, 2):
-                getattr(self, 'rx' + str(rx_index))(self.q_device, wires=q)
-                getattr(self, 'ry' + str(ry_index))(self.q_device, wires=q + 1)
-                getattr(self, 'crx' + str(crx_index))(self.q_device, wires=[q, q + 1])
-                crx_index += 1
-                rx_index += 1
-                ry_index += 1
-            for q in range(0, self.n_wires, 2):
-                getattr(self, 'rx' + str(rx_index))(self.q_device, wires=q)
-                getattr(self, 'ry' + str(ry_index))(self.q_device, wires=q + 1)
-                rx_index += 1
-                ry_index += 1
+            for i in range(self.num_layers):
+                step = 2 ** i
+                for j in range(self.repeats[i]):
+                    for q in range(0, qubits, step * 2):
+                        for k in range(step):
+                            getattr(self, 'cnot' + str(cnot_index))(self.q_device, wires=[q + k, q + k + step])
+                            cnot_index += 1
+                        for k in range(step * 2):
+                            getattr(self, 'rx' + str(rx_index))(self.q_device, wires=q + k)
+                            rx_index += 1
+                            getattr(self, 'rx' + str(rx_index))(self.q_device, wires=q + k)
+                            rx_index += 1
+                            getattr(self, 'ry' + str(ry_index))(self.q_device, wires=q + k)
+                            ry_index += 1
 
-            for q in range(0, self.n_wires, 4):
-                getattr(self, 'crx' + str(crx_index))(self.q_device, wires=[q, q + 1])
-                crx_index += 1
-                getattr(self, 'crx' + str(crx_index))(self.q_device, wires=[q + 1, q + 2])
-                crx_index += 1
-                getattr(self, 'crx' + str(crx_index))(self.q_device, wires=[q + 2, q + 3])
-                crx_index += 1
-                getattr(self, 'crx' + str(crx_index))(self.q_device, wires=[q + 3, q + 2])
-                crx_index += 1
-                getattr(self, 'crx' + str(crx_index))(self.q_device, wires=[q + 2, q + 1])
-                crx_index += 1
-                getattr(self, 'crx' + str(crx_index))(self.q_device, wires=[q + 1, q])
-                crx_index += 1
 
-            for q in range(0, self.n_wires, 2):
-                getattr(self, 'rx' + str(rx_index))(self.q_device, wires=q)
-                getattr(self, 'ry' + str(ry_index))(self.q_device, wires=q + 1)
-                rx_index += 1
-                ry_index += 1
-            for q in range(7):
-                getattr(self, 'crx' + str(crx_index))(self.q_device, wires=[q, q + 1])
-                crx_index += 1
-
-            for q in range(7, 0, -1):
-                getattr(self, 'crx' + str(crx_index))(self.q_device, wires=[q, q - 1])
-                crx_index += 1
-
-    def __init__(self):
+    def __init__(self, repeats, encoder ,n_wires=8):
         super().__init__()
-        self.n_wires = 8
+        self.encoder = encoder
+        self.n_wires = n_wires
         self.q_device = tq.QuantumDevice(n_wires=self.n_wires)
-        self.encoder = tq.AmplitudeEncoder()
-        self.q_layer = self.QLayer()
+        self.q_layer = self.QLayer(repeats, n_wires)
         self.measure = tq.MeasureAll(tq.PauliZ)
 
     def forward(self, x, use_qiskit=False):
@@ -106,70 +87,29 @@ class QFCModel(tq.QuantumModule):
         x = F.avg_pool2d(x, 6).view(bsz, 16)
         devi = x.device
 
-        if use_qiskit:
-            circ_all = []
-            for k in range(bsz):
-                circ = QuantumCircuit(self.n_wires)
-                state = x[k]
-                block1 = torch.stack((state[0], state[1], state[4], state[5]))
-                block2 = torch.stack((state[2], state[3], state[6], state[7]))
-                block3 = torch.stack((state[8], state[9], state[12], state[13]))
-                block4 = torch.stack((state[10], state[11], state[14], state[15]))
-                chunks1 = [block1, block2, block3, block4]
+        out = x
+        out2 = torch.zeros(
+            x.shape[0], 2 ** self.q_device.n_wires,
+            device=x.device)
 
-                for i in range(len(chunks1)):
-                    chunks1[i] = chunks1[i] / (torch.sqrt((chunks1[i].abs() ** 2).sum(dim=-1))).unsqueeze(-1)
-                    chunks1[i] = np.complex128(chunks1[i])
-                    chunks1[i] = chunks1[i] / (np.absolute(chunks1[i]) ** 2).sum()
-                    chunks1[i] = switch_little_big_endian_state(chunks1[i])
+        for i, t in enumerate(out):
+            # Group and encode the data
+            qubits_list = self.encoder(self.q_device, t.view(4, 4))
 
-                qiskit.circuit.library.data_preparation.state_preparation._EPS = 1e-5
-                circ.initialize(chunks1[0], [0, 1])
-                circ.initialize(chunks1[1], [2, 3])
-                circ.initialize(chunks1[2], [4, 5])
-                circ.initialize(chunks1[3], [6, 7])
-                circ_all.append(circ)
+            temp = qubits_list[0].states
+            for qubits in qubits_list[1:]:
+                temp = torch.kron(temp, qubits.states)
 
-            encoder_circs = circ_all
-            q_layer_circ = tq2qiskit(self.q_device, self.q_layer)
-            measurement_circ = tq2qiskit_measurement(self.q_device,
-                                                     self.measure)
-            assembled_circs = qiskit_assemble_circs(encoder_circs,
-                                                    q_layer_circ,
-                                                    measurement_circ)
+            out2[i] = temp
 
-            x0 = self.qiskit_processor.process_ready_circs(
-                self.q_device, assembled_circs).to(devi)
+        states1d = out2
+        states1d = states1d.view([out2.shape[0]] + [2] * self.q_device.n_wires)
+        self.q_device.states = states1d.type(tq.C_DTYPE)
+        self.q_layer(self.q_device)
+        x = self.measure(self.q_device)
 
-            x = x0
-
-        else:
-            out = x
-            out2 = torch.zeros(
-                x.shape[0], 2 ** self.q_device.n_wires,
-                device=x.device)
-            for i, t in enumerate(out):
-                block1 = torch.stack((t[0], t[1], t[4], t[5]))
-                block2 = torch.stack((t[2], t[3], t[6], t[7]))
-                block3 = torch.stack((t[8], t[9], t[12], t[13]))
-                block4 = torch.stack((t[10], t[11], t[14], t[15]))
-
-                chunks1 = [block1, block2, block3, block4]
-
-                temp = torch.tensor(chunks1[0])
-                temp = temp / (torch.sqrt((temp.abs() ** 2).sum(dim=-1))).unsqueeze(-1)
-                for c in range(1, len(chunks1)):
-                    temp2 = torch.tensor(chunks1[c])
-                    temp2 = temp2 / (torch.sqrt((temp2.abs() ** 2).sum(dim=-1))).unsqueeze(-1)
-                    temp = torch.kron(temp, temp2)
-
-                out2[i] = temp
-
-            states1d = out2
-            states1d = states1d.view([out2.shape[0]] + [2] * self.q_device.n_wires)
-            self.q_device.states = states1d.type(C_DTYPE)
-            self.q_layer(self.q_device)
-            x = self.measure(self.q_device)
+        if x.shape[0] != bsz:
+            x = x.repeat(bsz, 1)
 
         x = x.reshape(bsz, 4, 2).sum(-1).squeeze()
 
@@ -177,8 +117,8 @@ class QFCModel(tq.QuantumModule):
 
         return x
 
-def train(dataflow, model, device, optimizer):
 
+def train(dataflow, model, device, optimizer):
     target_all = []
     output_all = []
     for feed_dict in dataflow['train']:
@@ -234,14 +174,10 @@ def valid_test(dataflow, split, model, device, qiskit=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--static', action='store_true', default=True, help='compute with '
-                                                              'static mode')
+    parser.add_argument('--static', action='store_true', default=True, help='compute with static mode')
     parser.add_argument('--pdb', action='store_true', help='debug with pdb')
-    parser.add_argument('--wires-per-block', type=int, default=2,
-                        help='wires per block int static mode')
-    parser.add_argument('--epochs', type=int, default=5,
-                        help='number of training epochs')
-
+    parser.add_argument('--wires-per-block', type=int, default=2, help='wires per block in static mode')
+    parser.add_argument('--epochs', type=int, default=5, help='number of training epochs')
     args = parser.parse_args()
 
     if args.pdb:
@@ -253,64 +189,56 @@ def main():
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    dataset = MNIST(
-        root='./mnist_data',
-        train_valid_split_ratio=[0.9, 0.1],
-        digits_of_interest=[1, 3, 6, 9],
-        n_test_samples=200,
-    )
+    dataset = MNIST(root='./mnist_data', train_valid_split_ratio=[0.9, 0.1], digits_of_interest=[0,1,2,4],
+                    n_test_samples=200)
     dataflow = dict()
     print(dataset['train'].n_instance)
     print(dataset['valid'].n_instance)
     print(dataset['test'].n_instance)
-    # sss
     for split in dataset:
         sampler = torch.utils.data.RandomSampler(dataset[split])
-        dataflow[split] = torch.utils.data.DataLoader(
-            dataset[split],
-            batch_size=256,
-            sampler=sampler,
-            num_workers=8,
-            pin_memory=True)
+        dataflow[split] = torch.utils.data.DataLoader(dataset[split], batch_size=256, sampler=sampler, num_workers=8,
+                                                      pin_memory=True)
 
     use_cuda = torch.cuda.is_available()
-    # device = torch.device("cuda" if use_cuda else "cpu")
-    device = torch.device("cpu")
-    model = QFCModel().to(device)
+    device = torch.device("cuda" if use_cuda else "cpu")
+    W = H = S = 2
+    dupes = [1, 1, 1, 1]
+    repeats = [1, 2, 1]
+    encoder = SpatialDataEncoder(W, H, S, dupes)
+    model = QFCModel(repeats, encoder, n_wires=8).to(device)
 
     n_epochs = args.epochs
     optimizer = optim.Adam(model.parameters(), lr=5e-3, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=n_epochs)
 
     if args.static:
-        # optionally to switch to the static mode, which can bring speedup
-        # on training
         model.q_layer.static_on(wires_per_block=args.wires_per_block)
     train_loss, train_acc = [], []
     test_loss, test_acc = [], []
     print(device)
-    q_layer_circ = tq2qiskit(QFCModel().q_device, QFCModel().q_layer)
-
+    q_layer_circ = tq2qiskit(QFCModel(repeats,encoder).q_device, QFCModel(repeats,encoder).q_layer)
     q_layer_circ.draw(output='mpl')
     plt.show()
     print('start')
     for epoch in range(n_epochs):
-        # train
         print(f"Epoch {epoch}:")
         tr_loss, tr_acc = train(dataflow, model, device, optimizer)
+        # print("get here?")
         train_loss.append(tr_loss)
         train_acc.append(tr_acc)
         print(optimizer.param_groups[0]['lr'])
 
-        # valid
         te_loss, te_acc = valid_test(dataflow, 'valid', model, device)
         test_loss.append(te_loss)
         test_acc.append(te_acc)
         scheduler.step()
     print("Done!")
-    # test
     valid_test(dataflow, 'test', model, device, qiskit=False)
-    # graph
+
+    #q_layer_circ = tq2qiskit(QFCModel(repeats, encoder).q_device, QFCModel(repeats, encoder).q_layer)
+   # q_layer_circ.draw(output='mpl')
+    #plt.show()
 
     plt.figure(figsize=(5, 3))
     plt.plot(range(1, n_epochs + 1), train_acc)
